@@ -1,13 +1,35 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import pymysql
-from services.query_scrapper import google_search,html_parser,comparer,google_search_morzilla
-from services.models_api import UserCreate,Login
+from services.query_scrapper import google_search,html_parser,comparer,google_search_morzilla,extract_reviews_from_url,get_database_connection,insert_tracker_data
+from services.models_api import UserCreate,Login,CartItem
 from datetime  import datetime,timedelta
 import jwt
+from typing import List
+import threading
+import time
+
 # Your JWT secret key
 SECRET_KEY = "your_secret_key"
 ALGORITHM = "HS256"
+
+
+
+# Define a function to run the insert_tracker_data function in a separate thread
+def run_insert_tracker_data():
+    conn = get_database_connection()
+  
+    while True:
+        # Run the function to insert tracker data
+        insert_tracker_data(conn)
+        
+        # Sleep for 15 minutes
+        time.sleep(15*60)  # 15 minutes in seconds
+
+# Create and start a new thread to run the insert_tracker_data function
+insert_tracker_thread = threading.Thread(target=run_insert_tracker_data)
+insert_tracker_thread.start()
+
 
 
 
@@ -58,8 +80,15 @@ cursor = conn.cursor()
 # API endpoints
 @app.post("/auth/signup")
 async def create_user(user: UserCreate):
-    sql = "INSERT INTO users (first_name, last_name, email, password) VALUES (%s, %s, %s, %s)"
-    val = (user.firstName, user.lastName, user.email, user.password)
+    # Check if email already exists
+    cursor.execute("SELECT email FROM users_data WHERE email = %s", (user.email,))
+    existing_email = cursor.fetchone()
+    if existing_email:
+        raise HTTPException(status_code=400, detail="Email already registered")
+
+    # Insert the new user
+    sql = "INSERT INTO users_data (username, email, password) VALUES (%s, %s, %s)"
+    val = (user.username, user.email, user.password)
     cursor.execute(sql, val)
     conn.commit()
     token = create_jwt_token(user.email)  # Create JWT token for the user
@@ -79,7 +108,7 @@ async def search(query: str):
 
 @app.post("/login/")
 async def user_login(login: Login):
-    sql = "SELECT * FROM users WHERE email = %s AND password = %s"
+    sql = "SELECT * FROM users_data WHERE email = %s AND password = %s"
     val = (login.email, login.password)
     cursor.execute(sql, val)
     user = cursor.fetchone()
@@ -88,6 +117,30 @@ async def user_login(login: Login):
         return {"success": True, "token": token}
     else:
         raise HTTPException(status_code=401, detail="Invalid username or password")
+
+
+# Insert data into the cart table
+@app.post("/insert_cart_item/")
+async def add_to_cart(item: CartItem):
+    try:
+        query = "INSERT INTO cart (email, product_id, product_url, image_url, product_description, price) VALUES (%s, %s, %s, %s, %s, %s)"
+        values = (item.email, item.product_id, item.product_url, item.image_url, item.product_description, item.price)
+        cursor.execute(query, values)
+        conn.commit()
+        return {"message": "Item added to cart successfully"}
+    except Exception as e:
+        return {"error": str(e)}
+
+# Delete cart data by product_id
+@app.delete("/cart/")
+async def delete_cart(product_id: str):
+    try:
+        query = "DELETE FROM cart WHERE product_id = %s"
+        cursor.execute(query, (product_id,))
+        conn.commit()
+        return {"message": f"Cart data with product ID {product_id} deleted successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
     
 
 @app.get("/get_product_info/")
@@ -98,6 +151,37 @@ async def get_product_info(url: str):
         return product_info
     else:
         return {"error": "Failed to fetch HTML content."}
+    
+
+# Define endpoint to retrieve cart by email
+@app.get("/cart/{email}")
+async def get_cart(email: str):
+    try:
+        # Create cursor
+        cursor = conn.cursor()
+
+        # Execute SQL query to retrieve cart for the given email
+        sql = f"SELECT * FROM cart WHERE email = '{email}'"
+        cursor.execute(sql)
+        cart_data = cursor.fetchall()
+
+        # Close cursor
+        cursor.close()
+
+        # Check if cart is empty
+        if not cart_data:
+            raise HTTPException(status_code=404, detail="Cart not found")
+
+        return cart_data
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
+# Define a route to extract reviews from a URL
+@app.post("/extract_reviews/")
+async def extract_reviews(url: str):
+    reviews = extract_reviews_from_url(url)
+    return reviews or []
 
 # Run the application with uvicorn
 if __name__ == "__main__":
